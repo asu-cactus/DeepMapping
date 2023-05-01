@@ -1,0 +1,11 @@
+*.data
+*.csv
+*.zip
+*.npy
+**/__pycache__/**
+**.dat
+**.h5
+**/.ipynb_checkpoints/**
+**.tbl
+**/.vscode
+**/DeepMapping.egg-info
