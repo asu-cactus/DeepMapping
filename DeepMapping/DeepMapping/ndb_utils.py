@@ -85,13 +85,27 @@ def data_manipulation(df, ops='None'):
     data_ori = df.to_records(index=False)
     return df, data_ori
 
-
+def create_features(x, max_len=None):
+    if max_len is None:
+        max_len = len(str(np.max(x)))
+    # one-hot encoding for each digit
+    x_features = np.zeros((len(x), max_len*10))
+    for idx in range(len(x)):
+        digit_idx = max_len - 1
+        for digit in str(x[idx])[::-1]:
+            x_features[idx, digit_idx*10 + int(digit)] = 1
+            digit_idx -= 1
+    return x_features, max_len
 
 def generate_query(x_start, x_end, num_query=5, sample_size=1000):
     list_sample_index = []
     for query_idx in tqdm(range(num_query)):
         np.random.seed(query_idx)
-        sample_index = np.random.choice(np.arange(x_start, x_end+1, dtype=np.int32), sample_size, replace=False).astype(np.int32)
+        try:
+            sample_index = np.random.choice(np.arange(x_start, x_end+1, dtype=np.int32), sample_size, replace=False).astype(np.int32)
+            raise Warning("Sample size to big, sample with replace instead")
+        except:
+            sample_index = np.random.choice(np.arange(x_start, x_end+1, dtype=np.int32), sample_size, replace=True).astype(np.int32)
         list_sample_index.append(sample_index)
     return list_sample_index
 
