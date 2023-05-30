@@ -11,7 +11,7 @@ Resources for SIGMOD 2024 Submission
     - [Benchmark](#benchmark)
         - [Task: Data Query](#task-data-query)
         - [Task: Data Manipulation](#task-data-manipulation)
-    - [Supplement Material](#supplement-material)
+    - [Supplemental Material](#supplemental-material)
         - [Comparison of end-end latency using hashing and binary search](#comparison-of-end-end-latency-using-hashing-and-binary-search)
         - [Comparison of end-end latency for running model in CPU/GPU](#comparison-of-end-end-latency-for-running-model-in-cpugpu)
         - [Comparison of tunning the partition size](#comparison-of-tunning-the-partition-size)
@@ -76,7 +76,7 @@ Run `python run_benchmark_data_query.py` to benchmark. To benchmark with differe
 
 These experiments measured overall storage overhead and end-end query latency for synthetic dataset with data manipulation, i.e. INSERT/UPDATE/DELETE. Run `python run_benchmark_data_manipulation.py` to benchmark it. To benchmark with different dataset, you should modify the file correspondingly by following the instructions provided in the python file.
 
-## Supplement Material
+## Supplemental Material
 
 All latency values are measured in ms.
 ### Comparison of end-end latency using hashing and binary search
