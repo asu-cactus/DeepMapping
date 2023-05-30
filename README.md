@@ -11,6 +11,8 @@ Resources for SIGMOD 2024 Submission
     - [Benchmark](#benchmark)
         - [Task: Data Query](#task-data-query)
         - [Task: Data Manipulation](#task-data-manipulation)
+    - [Supplement Material](#supplement-material)
+        - [Comparison of end-end latency for Running NN model in CPU/GPU](#comparison-of-end-end-latency-for-running-nn-model-in-cpugpu)
 
 <!-- /TOC -->
 
@@ -71,3 +73,20 @@ Run `python run_benchmark_data_query.py` to benchmark. To benchmark with differe
 ### Task: Data Manipulation
 
 These experiments measured overall storage overhead and end-end query latency for synthetic dataset with data manipulation, i.e. INSERT/UPDATE/DELETE. Run `python run_benchmark_data_manipulation.py` to benchmark it. To benchmark with different dataset, you should modify the file correspondingly by following the instructions provided in the python file.
+
+## Supplement Material
+
+### Comparison of end-end latency for running model in CPU/GPU
+
+|       Tables      | Number of Query Data (B) | Run Model On | NN Inference Time | Total Time |
+|:-----------------:|:------------------------:|:------------:|:-----------------:|:----------:|
+| TPCH-S10/customer |          100000          |      GPU     |       110.84      |  5,454.34  |
+| TPCH-S10/customer |          100000          |      CPU     |       663.30      |  6,058.63  |
+| TPCH-S10/lineitem |          100000          |      GPU     |       294.86      |  10,511.73 |
+| TPCH-S10/lineitem |          100000          |      CPU     |      2,909.44     |  12,791.68 |
+|  TPCH-S10/orders  |          100000          |      GPU     |       81.38       |  2,351.74  |
+|  TPCH-S10/orders  |          100000          |      CPU     |       403.41      |  2,707.00  |
+|   TPCH-S10/part   |          100000          |      GPU     |       238.95      |  5,686.15  |
+|   TPCH-S10/part   |          100000          |      CPU     |       310.98      |  5,804.16  |
+| TPCH-S10/supplier |          100000          |      GPU     |       56.59       |  5,097.88  |
+| TPCH-S10/supplier |          100000          |      CPU     |       75.77       |  5,153.22  |

@@ -26,6 +26,9 @@ shared_utils = ctypes.CDLL(os.path.abspath("shared_utils.so")) # Or full path to
 shared_utils.create_fetures.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int]
 shared_utils.create_fetures_mutlt_thread_mgr.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int32, ctypes.c_int32]
 
+shared_utils.aux_look_up_bin.argtypes = [ND_POINTER_2, ctypes.c_int, ctypes.c_long]
+shared_utils.aux_look_up_bin.restype = ctypes.c_long
+
 def encode_label(arr):
     label_encoder = preprocessing.LabelEncoder().fit(arr)
     arr_encode = label_encoder.transform(arr)
@@ -173,7 +176,10 @@ def compress_data(df, model_sturcture, batch_size=1024, num_epochs=500, train_ve
 
 def measure_latency_any(df, data_ori, task_name, sample_size, 
                     generate_file=True, memory_optimized=True, latency_optimized=True,
-                    num_loop=10, num_query=5, search_algo='binary', path_to_model=None):
+                    num_loop=10, num_query=5, search_algo='binary', path_to_model=None,
+                    block_size=1024*1024):
+    # TODO add support of hash to run-time memory optimized strategy
+    # TODO add support of binary_c to run-time memory optimized strategy
     """Measure the end-end latency of data query
 
     Args:
@@ -210,12 +216,13 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
     df_key = [df.columns[0]]
     list_y_encoded = []
     list_y_encoder = []
-
+    size_encoder = 0
     for col in df.columns:
         if col not in df_key:
             encoded_val, encoder = encode_label(df[col])
             list_y_encoded.append(encoded_val)
             list_y_encoder.append(encoder)
+            size_encoder += encoder.classes_.nbytes
     num_tasks = len(list_y_encoded)
     
     for encoder in list_y_encoder:
@@ -295,7 +302,8 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         if len(misclassified_data) == 0:
             misclassified_data = np.zeros((1,2))
         record_size = misclassified_data[0].nbytes
-        block_size = 1024 * 1024
+        # block_size = 1024 * 1024
+        # block_size = 1024 * 512
         num_record_per_part = np.floor(block_size / record_size)
 
         x_start = np.min(misclassified_data[:,0])
@@ -320,7 +328,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
             ndb_utils.save_byte_to_disk(file_name, data_zstd_comp)
 
         data_ori_size = data_ori.nbytes/1024/1024
-        data_comp_size = [comp_zstd_size, model.count_params()*4/1024/1024, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
+        data_comp_size = [size_encoder, comp_zstd_size, model.count_params()*4/1024/1024, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
         print('Ori Size: {}, Curr Size: {}'.format(data_ori.nbytes/1024/1024, data_comp_size))
         np.save(os.path.join(comp_data_dir, 'num_record_per_part'), num_record_per_part)
     else:
@@ -334,7 +342,6 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
     shared_utils.create_fetures_mutlt_thread_mgr.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int32, ctypes.c_int32]
     shared_utils.create_fetures_mutlt_thread_mgr.restype = ctypes.POINTER(ctypes.c_bool * (sample_size * max_len * 10))
     list_sample_index = ndb_utils.generate_query(x_start, x_end, num_query=num_query, sample_size=sample_size)
-
     # Measure latency for run-time memory optimzed strategy
     if memory_optimized:
         timer_creatfeatures = ndb_utils.Timer()
@@ -461,6 +468,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         timer_exist_lookup = ndb_utils.Timer()
         timer_remap = ndb_utils.Timer()
         timer_sort = ndb_utils.Timer()
+        timer_build_index = ndb_utils.Timer()
         t_remap = 0
         t_decomp = 0
         t_createfeatures = 0
@@ -470,6 +478,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         t_total = 0
         t_sort = 0
         t_locate_part = 0
+        t_build_index = 0
         block_bytes_size = 0
         timer_total.tic()
         for _ in tqdm(range(num_loop)):
@@ -479,6 +488,9 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
             peak_memory = 0
             cache_block_memory = 0
 
+            # build hash table
+            if search_algo == 'hash':
+                data_hash = dict()
             for query_idx in range(num_query):
                 sample_index = list_sample_index[query_idx]                
                 timer_total.tic()                
@@ -494,6 +506,8 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                     x_features_arr, sample_index, sample_size, max_len, num_threads)
                 sampled_features = np.frombuffer(
                     x_features_arr_ptr.contents, dtype=bool).reshape(sample_size, -1)
+                # sampled_features = ndb_utils.create_features(sample_index, max_len)[0]
+
                 t_createfeatures += timer_creatfeatures.toc()
                 timer_nn.tic()
                 y_nn_pred = model(sampled_features)
@@ -506,7 +520,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                         col_name = data_ori.dtype.names[i+1]
                         result[col_name] = np.argmax(y_nn_pred[i], axis=1)
                 t_nn += timer_nn.toc()
-
+                
                 for idx, val in enumerate(sample_index):
                     # ------ non exist look up
                     timer_exist_lookup.tic()
@@ -536,17 +550,44 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                             zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
                             decomp_aux_block[part_idx] = data_uncomp
                             num_decomp += 1
-                            cache_block_memory += data_uncomp.nbytes
                             block_bytes_size = sys.getsizeof(block_zstd_comp)
                             prev_part_idx = part_idx
+
+                            # TODO add size computation for hash approach
+                            if search_algo == 'hash':
+                                t_decomp += timer_decomp.toc()
+                                timer_build_index.tic()
+                                for block_data_idx in range(len(data_uncomp)):
+                                    data_entry_key = data_uncomp[block_data_idx, 0]
+                                    # print(data_entry_key)
+                                    data_entry_val = data_uncomp[block_data_idx]
+                                    data_hash[data_entry_key] = data_entry_val   
+                                cache_block_memory = sys.getsizeof(data_hash)
+                                t_build_index += timer_build_index.toc()
+                                timer_decomp.tic()
+                            else:
+                                cache_block_memory += data_uncomp.nbytes 
                         else:
                             data_uncomp = decomp_aux_block[part_idx]
                         t_decomp += timer_decomp.toc()    
                         timer_aux_lookup.tic()
-                        data_idx = ndb_utils.binary_search(data_uncomp[:,0], query_key, len(data_uncomp))
-                        
-                        if data_idx != -1:
-                            result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
+                        if search_algo == 'binary':
+                            # TODO code can be optimized at revision stage
+                            data_idx = ndb_utils.binary_search(data_uncomp[:,0], query_key, len(data_uncomp))
+                            if data_idx != -1:
+                                result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
+                            else:
+                                count_nonexist += 1
+                        elif search_algo == 'binary_c': 
+                            data_idx = shared_utils.aux_look_up_bin(data_uncomp[:,0], query_key, len(data_uncomp))
+                            if data_idx != -1:
+                                result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
+                            else:
+                                count_nonexist += 1
+                        elif search_algo == 'hash':
+                            if query_key in data_hash.keys():
+                                result[query_key_index_in_old] = tuple(data_hash[query_key])
+
                         t_aux_lookup += timer_aux_lookup.toc()    
 
                     if cache_block_memory + block_bytes_size > peak_memory:
@@ -562,7 +603,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
 
         peak_memory += exist_bit_arr.nbytes
         latency_optimized_result = result.copy()
-        latency_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop,
+        latency_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop, t_build_index / num_loop,
       t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model.count_params()*4/1024/1024)).T
 
     return_latency = None 

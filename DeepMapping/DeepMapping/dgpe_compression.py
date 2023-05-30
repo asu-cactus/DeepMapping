@@ -304,6 +304,7 @@ def measure_latency(df, data_ori, task_name, sample_size,
                 t_sort += timer_sort.toc()
                 result = np.recarray((sample_size,), dtype=data_ori.dtype)
                 result_idx = 0
+                current_memory = 0
 
                 for idx in range(sample_size):
                     timer_locate_part.tic()    
