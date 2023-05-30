@@ -178,8 +178,8 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                     generate_file=True, memory_optimized=True, latency_optimized=True,
                     num_loop=10, num_query=5, search_algo='binary', path_to_model=None,
                     block_size=1024*1024):
-    # TODO add support of hash to run-time memory optimized
-    # TODO add support of binary_c to run-time memory optimized
+    # TODO add support of hash to run-time memory optimized strategy
+    # TODO add support of binary_c to run-time memory optimized strategy
     """Measure the end-end latency of data query
 
     Args:
@@ -216,12 +216,13 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
     df_key = [df.columns[0]]
     list_y_encoded = []
     list_y_encoder = []
-
+    size_encoder = 0
     for col in df.columns:
         if col not in df_key:
             encoded_val, encoder = encode_label(df[col])
             list_y_encoded.append(encoded_val)
             list_y_encoder.append(encoder)
+            size_encoder += encoder.classes_.nbytes
     num_tasks = len(list_y_encoded)
     
     for encoder in list_y_encoder:
@@ -327,7 +328,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
             ndb_utils.save_byte_to_disk(file_name, data_zstd_comp)
 
         data_ori_size = data_ori.nbytes/1024/1024
-        data_comp_size = [comp_zstd_size, model.count_params()*4/1024/1024, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
+        data_comp_size = [size_encoder, comp_zstd_size, model.count_params()*4/1024/1024, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
         print('Ori Size: {}, Curr Size: {}'.format(data_ori.nbytes/1024/1024, data_comp_size))
         np.save(os.path.join(comp_data_dir, 'num_record_per_part'), num_record_per_part)
     else:
@@ -489,7 +490,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
 
             # build hash table
             if search_algo == 'hash':
-                data_hash = dict() 
+                data_hash = dict()
             for query_idx in range(num_query):
                 sample_index = list_sample_index[query_idx]                
                 timer_total.tic()                

@@ -21,8 +21,8 @@ shared_utils.aux_look_up_bin.restype = ctypes.c_long
 def measure_latency(df, data_ori, task_name, sample_size, 
                     generate_file=True, memory_optimized=True, latency_optimized=True,
                     num_loop=10, num_query=5, search_algo='binary', block_size=1024*1024):
-    # TODO add support for memory-optimized strategy
-    # TODO add support of binary_c to run-time memory optimized
+    # TODO add support for run-time memory optimized strategy
+    # TODO add support of binary_c to run-time memory optimized strategy
     """Measure the end-end latency of data query
 
     Args:
@@ -86,6 +86,7 @@ def measure_latency(df, data_ori, task_name, sample_size,
             data_part = data_ori[data_idx]
 
             if search_algo == 'binary_c':
+                # FIXME temporary workaround to avoid the overhead of converting to contiguous array
                 dict_contigous_key[block_idx] = np.array(data_part[key], order='F').astype(np.int32)
 
             if len(data_part) == 0:
@@ -225,7 +226,6 @@ def measure_latency(df, data_ori, task_name, sample_size,
                         num_decomp += 1
                         block_bytes_size = sys.getsizeof(block_bytes)
 
-                        # TODO add size computation for hash approach
                         if search_algo == 'hash':
                             t_decomp += timer_decomp.toc()
                             timer_build_index.tic()
