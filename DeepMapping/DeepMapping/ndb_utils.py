@@ -1,12 +1,30 @@
+import gc
 import numpy as np
-import pandas as pd
-import time
 import os
-import shutil
 import pandas as pd
+import pickle
+import psutil
+import shutil
+import time
+import sys
+from heapq import nsmallest
 from tqdm.auto import tqdm 
 
-def df_preprocess(df, benchmark = None):
+def recarr_to_ndarray(rec_arr):
+    type_list = []
+    for i in range(len(rec_arr.dtype)):
+        col_name = rec_arr.dtype.names[i]
+        col_type = rec_arr.dtype[i]
+        
+        if col_type == 'O':
+            col_type = 'S8'
+        type_list.append((col_name, col_type))
+    
+    ndarray = np.array(rec_arr, dtype=type_list)
+    del rec_arr
+    return ndarray
+
+def df_preprocess(df, benchmark = None, to_ndarray=True):
     if 'PARTKEY' in df.columns and 'SUPPKEY' in df.columns:
         df.reset_index(inplace=True)
         df.drop(['PARTKEY', 'SUPPKEY', 'QUANTITY'], axis=1, inplace=True)
@@ -43,9 +61,11 @@ def df_preprocess(df, benchmark = None):
     key = df.columns[0]
     df.sort_values(by=key, inplace=True)
     data_ori = df.to_records(index=False)
+    if to_ndarray:
+        data_ori = recarr_to_ndarray(data_ori)
     return df, data_ori
 
-def data_manipulation(df, ops='None'):
+def data_manipulation(df, ops='None', to_ndarray=True):
     # default use 90% data
     if ops == 'None':
         pass
@@ -84,6 +104,8 @@ def data_manipulation(df, ops='None'):
     key = df.columns[0]
     df.sort_values(by=key, inplace=True)
     data_ori = df.to_records(index=False)
+    if to_ndarray:
+        data_ori = recarr_to_ndarray(data_ori)
     return df, data_ori
 
 def process_df_for_synthetic_data(df):
@@ -204,14 +226,42 @@ def recreate_temp_dir(comp_data_dir):
     else:
         shutil.rmtree(comp_data_dir)
         os.makedirs(comp_data_dir)
+
 def save_byte_to_disk(file_name, f_bytes):
     with open(file_name, "wb") as binary_file:
         binary_file.write(f_bytes)
+
 def read_bytes_from_disk(file_name):
     with open(file_name, "rb") as f:
         bytes_read = f.read()
     return bytes_read
 
+def save_recarray_to_disk(file_name, rec_arr):
+    np.save(file_name, rec_arr, allow_pickle=True)
+
+def load_recarray_from_disk(file_name):
+    return np.load(file_name, allow_pickle=True)
+
+def save_obj_to_disk_with_pickle(file_name, data):
+    with open(file_name, "wb") as f:
+        pickle.dump(data, f)
+
+def load_obj_from_disk_with_pickle(file_name):
+    with open(file_name, "rb") as f:
+        obj = pickle.load(f)
+    return obj
+
+def save_hashtable_to_disk(file_name, hashtable):
+    with open(file_name, "wb") as f:
+        pickle.dump(hashtable, f)
+
+def load_hashtable_from_disk(file_name):
+    with open(file_name, 'rb') as f:
+        hash_table = pickle.load(f)
+    return hash_table
+
+def get_size_of_file(file_name):
+    return os.path.getsize(file_name)
 
 class Timer(object):
     """A convenient class to measure the running time of a program
@@ -252,3 +302,34 @@ def binary_search(x, val, num_record, search_larger_value=False):
         return low
     else:
         return -1
+
+def get_available_memory():
+    return psutil.virtual_memory()[1]
+
+def evict_unused_partition(decomp_block_dict, partition_hit, free_memory):
+    max_try = 10
+    curr_try = 0
+    while get_available_memory() < free_memory:
+        if curr_try > max_try:
+            return 
+        curr_try += 1
+        list_least_used_partition_id = nsmallest(100, partition_hit, key = partition_hit.get)
+        for least_used_partition_id in list_least_used_partition_id:
+            # least_used_partition_id = min(partition_hit, key=partition_hit.get)
+            del decomp_block_dict[least_used_partition_id]
+            del partition_hit[least_used_partition_id]
+            # print('[DEBUG] eviction work')
+        decomp_block_dict = dict(decomp_block_dict)
+        # gc.collect()
+        if decomp_block_dict is None:
+            return dict()
+    return decomp_block_dict
+
+def get_nested_dict_size(d):
+    total_size = sys.getsizeof(d)
+    for value in d.values():
+        if isinstance(value, dict):
+            total_size += get_nested_dict_size(value)
+        else:
+            total_size += sys.getsizeof(value)
+    return total_size

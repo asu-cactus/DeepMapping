@@ -1,8 +1,12 @@
 bitarray==2.6.2
 matplotlib==3.7.0
-more_itertools==9.1.0
+more_itertools==10.1.0
 numpy==1.24.1
+onnx==1.14.0
+onnx_opcounter==0.0.3
+onnxruntime==1.15.1
 pandas==1.5.3
+psutil==5.9.4
 python_lzo==1.14
 scikit_learn==1.2.1
 setuptools==65.5.0
@@ -11,3 +15,4 @@ torch==2.0.0.dev20230202+cu116
 torchmetrics==0.9.3
 tqdm==4.64.1
 zstd==1.5.2.6
+protobuf==3.20.0
