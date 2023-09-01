@@ -5,23 +5,13 @@ Resources for SIGMOD 2024 Submission
 <!-- TOC -->
 
 - [DeepMapping: The Case for Learned Data Mapping for Compression and Efficient Query Processing](#deepmapping-the-case-for-learned-data-mapping-for-compression-and-efficient-query-processing)
-    - [Set-Up](#set-up)
-    - [Dataset](#dataset)
-    - [Model Searching](#model-searching)
-    - [Benchmark](#benchmark)
-        - [Task: Data Query](#task-data-query)
-        - [Task: Data Manipulation](#task-data-manipulation)
-    - [Supplemental Material](#supplemental-material)
-        - [Comparison of end-end latency using hashing and binary search](#comparison-of-end-end-latency-using-hashing-and-binary-search)
-        - [Comparison of end-end latency for running model in CPU/GPU](#comparison-of-end-end-latency-for-running-model-in-cpugpu)
-        - [Comparison of tunning the partition size](#comparison-of-tunning-the-partition-size)
+  - [Dataset](#dataset)
+  - [Model Searching](#model-searching)
+  - [Benchmark](#benchmark)
+    - [Task: Data Query](#task-data-query)
+    - [Task: Data Manipulation](#task-data-manipulation)
 
 <!-- /TOC -->
-
-## Set-Up
-
-1. Please install the required dependencies via `pip install -r requirements.txt`
-
 2. DeepMapping is wrapped up as a Python library, please run the following command to install it.
 
     ```
@@ -37,9 +27,9 @@ Resources for SIGMOD 2024 Submission
 
 ## Dataset
 
-Our experiments covered synthetic datasets, low/high correlation datasets with different scales(100MB, 1GB, 10GB), and TPC-H, TPC-DS benchmark datasets with scale factors as 1 and 10. We removed all string/continuous columns and uploaded our pre-generated datasets to [**HERE**](https://mega.nz/file/aUREBDQI#vW-rUQOTOr0B7uN9XhcOFXd2dqfe5yA18-Mk3xn-Dvc):
+Our experiments covered synthetic datasets, low/high correlation datasets with different scales(100MB, 1GB, 10GB), and TPC-H, TPC-DS benchmark datasets with scale factors as 1 and 10. We removed all string/continuous columns and uploaded our pre-generated datasets to [**HERE**](#FIXME):
 
-[**DATA LINK: https://mega.nz/file/aUREBDQI#vW-rUQOTOr0B7uN9XhcOFXd2dqfe5yA18-Mk3xn-Dvc**](https://mega.nz/file/aUREBDQI#vW-rUQOTOr0B7uN9XhcOFXd2dqfe5yA18-Mk3xn-Dvc)
+[**DATA LINK: Uploading...**](#FIXME)
 
 After download it, please unzip it to the **root** folder of this GitHub repository. Then, you will see a **dataset**  folder here.
 
@@ -58,9 +48,9 @@ List of datasets:
 
 ## Benchmark 
 
-We provided some example models for the following 2 tasks. Please go [**HERE**](https://mega.nz/file/SdYWHAzZ#AAuYAz_-UmHXWUixHGOzzBJN0NTmwY6N66da3UyRS9s) to download:
+We provided some example models for the following 2 tasks. Please go [**HERE**](#FIXME) to download:
 
-[**MODEL LINK: https://mega.nz/file/SdYWHAzZ#AAuYAz_-UmHXWUixHGOzzBJN0NTmwY6N66da3UyRS9s**](https://mega.nz/file/SdYWHAzZ#AAuYAz_-UmHXWUixHGOzzBJN0NTmwY6N66da3UyRS9s)
+[**MODEL LINK: Uploading...**](#FIXME)
 
 After download it, please unzip it to the **root** folder of this GitHub repository. Then, you will see a **models**  folder here.
 
@@ -75,18 +65,3 @@ Run `python run_benchmark_data_query.py` to benchmark. To benchmark with differe
 ### Task: Data Manipulation
 
 These experiments measured overall storage overhead and end-end query latency for synthetic dataset with data manipulation, i.e. INSERT/UPDATE/DELETE. Run `python run_benchmark_data_manipulation.py` to benchmark it. To benchmark with different dataset, you should modify the file correspondingly by following the instructions provided in the python file.
-
-## Supplemental Material
-
-All latency values are measured in ms.
-### Comparison of end-end latency using hashing and binary search
-
-![tab-binary-vs-hash](./imgs/tab-binary-vs-hash.png)
-### Comparison of end-end latency for running model in CPU/GPU
-
-![tab-cpu-vs-gpu](./imgs/tab-cpu-vs-gpu.png)
-### Comparison of tunning the partition size
-
-Experiments results are measured on TPC-H, SF=10, `orders` table, B=100,000
-
-![tab-cpu-vs-gpu](./imgs/tab-partition-size.png)
