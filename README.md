@@ -27,9 +27,9 @@ Resources for SIGMOD 2024 Submission
 
 ## Dataset
 
-Our experiments covered synthetic datasets, low/high correlation datasets with different scales(100MB, 1GB, 10GB), and TPC-H, TPC-DS benchmark datasets with scale factors as 1 and 10. We removed all string/continuous columns and uploaded our pre-generated datasets to [**HERE**](#FIXME):
+Our experiments covered synthetic datasets, low/high correlation datasets with different scales(100MB, 1GB, 10GB), and TPC-H, TPC-DS benchmark datasets with scale factors as 1 and 10. We removed all string/continuous columns and uploaded our pre-generated datasets to [**HERE**](https://mega.nz/file/nNggnQzA#9Ma2v3GIrfR-3ndGNzGXsF5ZOcWtGwZKeRekUiqOnzA):
 
-[**DATA LINK: Uploading...**](#FIXME)
+[**DATA LINK: Here**](https://mega.nz/file/nNggnQzA#9Ma2v3GIrfR-3ndGNzGXsF5ZOcWtGwZKeRekUiqOnzA)
 
 After download it, please unzip it to the **root** folder of this GitHub repository. Then, you will see a **dataset**  folder here.
 
@@ -48,9 +48,9 @@ List of datasets:
 
 ## Benchmark 
 
-We provided some example models for the following 2 tasks. Please go [**HERE**](#FIXME) to download:
+We provided some example models for the following 2 tasks. Please go [**HERE**](https://mega.nz/file/icxG1JaL#cuC5C4_PxQ1FsgSUmswfaXyzCaatOwx9n_b9F_-IDnU) to download:
 
-[**MODEL LINK: Uploading...**](#FIXME)
+[**MODEL LINK: Here**](https://mega.nz/file/icxG1JaL#cuC5C4_PxQ1FsgSUmswfaXyzCaatOwx9n_b9F_-IDnU)
 
 After download it, please unzip it to the **root** folder of this GitHub repository. Then, you will see a **models**  folder here.
 
