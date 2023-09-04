@@ -1,17 +1,24 @@
-import pandas as pd 
-import numpy as np
-import sys
-import zstd
+import ctypes
+import gc
 import math
+import numpy as np
+import onnx
+import onnxruntime as ort
 import os
-from DeepMapping import ndb_utils
+import pandas as pd 
+import sys
 import tensorflow as tf
+import zstd
+
+from bitarray import bitarray
+from collections import defaultdict
+from DeepMapping import ndb_utils
+from onnx_opcounter import calculate_params
+
+from sklearn import preprocessing
 from tensorflow.keras import layers, regularizers
 from tensorflow import keras
-import ctypes
-from sklearn import preprocessing
-from bitarray import bitarray
-from more_itertools import run_length
+
 from tqdm.auto import tqdm
 
 
@@ -78,7 +85,7 @@ class DataGenerator(tf.keras.utils.Sequence):
         X = create_features_c_multi_thread(shared_utils, data_x, num_record, max_len)
         
         return X, Y
-        
+    
         
     def on_epoch_end(self):
         """Updates indexes after each epoch
@@ -86,6 +93,38 @@ class DataGenerator(tf.keras.utils.Sequence):
         self.indexes = np.arange(len(self.x))
         if self.shuffle == True:
             np.random.shuffle(self.indexes)
+
+class InferenceDataGenerator(tf.keras.utils.Sequence):
+    def __init__(self, x, batch_size, max_len, shuffle=False):
+        self.x = x
+        self.batch_size = batch_size
+        self.max_len = max_len
+        self.shuffle = shuffle
+    
+    def __len__(self):
+        return int(np.ceil(len(self.x) / self.batch_size))
+    
+    def __getitem__(self, index):
+        idx_start = index*self.batch_size
+        idx_end = (index+1)*self.batch_size
+        data_x = self.x[idx_start:idx_end]
+
+        num_record = len(data_x)
+        max_len = self.max_len
+        
+        shared_utils.create_fetures.restype = ctypes.POINTER(ctypes.c_bool * (num_record * max_len * 10))
+        shared_utils.create_fetures_mutlt_thread_mgr.restype = ctypes.POINTER(ctypes.c_bool * (num_record * max_len * 10))
+
+        X = create_features_c_multi_thread(shared_utils, data_x, num_record, max_len)
+        
+        return X
+    
+        
+    def on_epoch_end(self):
+        """Updates indexes after each epoch
+        """
+        self.indexes = np.arange(len(self.x))
+
 
 def build_model(num_in, model_sturcture, list_num_out):
     x = tf.keras.Input(shape=(num_in,1))
@@ -174,12 +213,51 @@ def compress_data(df, model_sturcture, batch_size=1024, num_epochs=500, train_ve
     else:
         return model, train_generator
 
+def finetune_model(df, model_path, batch_size=1024, num_epochs=500, train_verbose=1, train=True):
+    df_key = [df.columns[0]]
+    list_y_encoded = []
+    list_y_encoder = []
+
+    for col in df.columns:
+        if col not in df_key:
+            encoded_val, encoder = encode_label(df[col])
+            list_y_encoded.append(encoded_val)
+            list_y_encoder.append(encoder)
+    num_tasks = len(list_y_encoded)
+    num_tasks
+
+    for encoder in list_y_encoder:
+        print(len(encoder.classes_))
+    
+    x = df[df_key[0]].values.astype(np.int32)
+    max_len = len(str(np.max(x)))
+    print('MAX LEN', max_len)
+    list_num_out = [len(encoder.classes_) for encoder in list_y_encoder]
+    strategy = tf.distribute.MirroredStrategy()
+    print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+
+    with strategy.scope():
+        # Everything that creates variables should be under the strategy scope.
+        # In general this is only model construction & `compile()`.
+        # model = build_model(max_len*10, model_sturcture, list_num_out)
+        # x = tf.keras.Input(shape=(num_in,1))
+        model = tf.keras.models.load_model(model_path)
+        model = tf.keras.models.clone_model(model, tf.keras.Input(shape=(max_len*10,1)))
+
+        opt = tf.keras.optimizers.Adam(learning_rate=1e-3, decay=1e-3/1000)
+        model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=["accuracy"])
+    train_generator = DataGenerator(x, list_y_encoded, batch_size, max_len)
+
+    if train == True:
+        train_history = model.fit(train_generator, epochs=num_epochs, verbose=train_verbose, callbacks=[SOMT(model, 1)])
+        return model, train_history
+    else:
+        return model, train_generator
+
 def measure_latency_any(df, data_ori, task_name, sample_size, 
                     generate_file=True, memory_optimized=True, latency_optimized=True,
                     num_loop=10, num_query=5, search_algo='binary', path_to_model=None,
                     block_size=1024*1024):
-    # TODO add support of hash to run-time memory optimized strategy
-    # TODO add support of binary_c to run-time memory optimized strategy
     """Measure the end-end latency of data query
 
     Args:
@@ -206,6 +284,8 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         path_to_model : str
             load model from custom path
     """
+    backend = os.environ['BACKEND']
+    mode = os.environ['MODE']
     data_ori_size = 0
     data_comp_size = 0
     memory_optimized_latency = None 
@@ -213,20 +293,25 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
     memory_optimized_result = None
     latency_optimized_result = None
 
+    
+    root_path = 'temp'
+    folder_name = 'deepmapping'
+    comp_data_dir = os.path.join(root_path, task_name, folder_name)
+    if 'DATA_OPS' in os.environ:
+        comp_data_dir = os.path.join(comp_data_dir, os.environ['DATA_OPS'])
+    print('[Generate File Path]: {}'.format(comp_data_dir))
+    
     df_key = [df.columns[0]]
     list_y_encoded = []
     list_y_encoder = []
     size_encoder = 0
-    for col in df.columns:
-        if col not in df_key:
-            encoded_val, encoder = encode_label(df[col])
-            list_y_encoded.append(encoded_val)
-            list_y_encoder.append(encoder)
-            size_encoder += encoder.classes_.nbytes
-    num_tasks = len(list_y_encoded)
-    
-    for encoder in list_y_encoder:
-        print(len(encoder.classes_))
+    exist_bit_arr = None
+    num_record_per_part = None 
+    data_comp_size = None 
+    max_len = None 
+    x_start = None 
+    x_end = None 
+    num_tasks = None 
 
     shared_utils = ctypes.CDLL(os.path.abspath("shared_utils.so")) # Or full path to file 
     ND_POINTER_1 = np.ctypeslib.ndpointer(dtype=np.bool_, 
@@ -242,45 +327,80 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
 
     num_threads = 8
 
-    x = df[df_key[0]].values.astype(np.int32)
-    max_len = len(str(np.max(x)))
-    y = np.array(list_y_encoded).T.astype(np.int32)
-    data = np.concatenate((x.reshape(-1,1), y), axis=1, dtype=np.int32)
-    print(data.nbytes/1024/1024)
-
     if path_to_model is None:
-        model = tf.keras.models.load_model('models/nas/{}.h5'.format(task_name), compile=False)
+        if backend == 'tf':
+            model = tf.keras.models.load_model('models2/nas/{}.h5'.format(task_name), compile=False)
+            model_size = model.count_params()*4/1024/1024
+        elif backend == 'onnx': 
+            model = ort.InferenceSession('models2/nas/{}.onnx'.format(task_name), providers=['CUDAExecutionProvider']) 
+            input_name = model.get_inputs()[0].name
+            model_size = calculate_params(onnx.load_model('models2/nas/{}.onnx'.format(task_name)))*4/1024/1024
     else:
-        model = tf.keras.models.load_model(path_to_model, compile=False)
-    train_generator = DataGenerator(x, list_y_encoded, 1024*2**4, max_len)
+        if backend == 'tf':
+            model = tf.keras.models.load_model(path_to_model, compile=False)
+            model_size = model.count_params()*4/1024/1024
+        elif backend == 'onnx':
+            model = ort.InferenceSession(path_to_model, providers=['CUDAExecutionProvider']) 
+            input_name = model.get_inputs()[0].name
+            model_size = calculate_params(onnx.load_model(path_to_model))*4/1024/1024
 
-    # exist_bitarray
-    x_start = np.min(x)
-    x_end = np.max(x)
-    exist_bit_arr = bitarray('0')*(x_end - x_start + 1)
-
-    for val in x:
-        exist_bit_arr[val-x_start] = 1
-    print(sys.getsizeof(exist_bit_arr)/1024/1024)
-
-    root_path = 'temp'
-    folder_name = 'ours-any'
-    comp_data_dir = os.path.join(root_path, task_name, folder_name)
-    
     print('[Generate File Path]: {}'.format(comp_data_dir))
     # generate file
     if generate_file:
         ndb_utils.recreate_temp_dir(comp_data_dir)
+        exp_data_dict = dict()
+
+
+        for col in df.columns:
+            if col not in df_key:
+                encoded_val, encoder = encode_label(df[col])
+                list_y_encoded.append(encoded_val)
+                list_y_encoder.append(encoder)
+                size_encoder += encoder.classes_.nbytes / 1024 / 1024
+        num_tasks = len(list_y_encoded)
+
+        exp_data_dict['list_y_encoder'] = list_y_encoder 
+        exp_data_dict['num_tasks'] = num_tasks 
+        exp_data_dict['size_encoder'] = size_encoder 
+        
+        for encoder in list_y_encoder:
+            print(len(encoder.classes_))
+
+        x = df[df_key[0]].values.astype(np.int32)
+        max_len = len(str(np.max(x)))
+        exp_data_dict['max_len'] = max_len
+        y = np.array(list_y_encoded).T.astype(np.int32)
+        data = np.concatenate((x.reshape(-1,1), y), axis=1, dtype=np.int32)
+        print(data.nbytes/1024/1024)
+
+        train_generator = DataGenerator(x, list_y_encoded, 1024*2**4, max_len)
+
+        # exist_bitarray
+        x_start = np.min(x)
+        x_end = np.max(x)
+        exist_bit_arr = bitarray('0')*(x_end - x_start + 1)
+
+        for val in x:
+            exist_bit_arr[val-x_start] = 1
+        print(sys.getsizeof(exist_bit_arr)/1024/1024)
+
         misclassified_index = []
 
         for idx, (x_sub,y_sub) in tqdm(enumerate(train_generator), total=len(train_generator)):
             y_sub = list(y_sub.values())
-            y_sub_pred = model(x_sub)
+            if backend == 'tf':
+                y_sub_pred = model(x_sub)
+            elif backend == 'onnx':
+                 y_sub_pred = model.run(None, {input_name: np.expand_dims(x_sub, -1).astype(np.float32)})
             mis_pred = []
 
             for i in range(num_tasks):
                 if num_tasks == 1:
-                    mis_pred.append(y_sub[i] != np.argmax(y_sub_pred, axis=1))
+                    if backend == 'tf':
+                        mis_pred.append(y_sub[i] != np.argmax(y_sub_pred, axis=1))
+                    if backend == 'onnx':
+                        mis_pred.append(y_sub[i] != np.argmax(y_sub_pred[0], axis=1))
+                    # mis_pred.append(y_sub[i] != np.argmax(y_sub_pred, axis=1))
                 else:
                     mis_pred.append(y_sub[i] != np.argmax(y_sub_pred[i], axis=1))
             
@@ -302,8 +422,6 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         if len(misclassified_data) == 0:
             misclassified_data = np.zeros((1,2))
         record_size = misclassified_data[0].nbytes
-        # block_size = 1024 * 1024
-        # block_size = 1024 * 512
         num_record_per_part = np.floor(block_size / record_size)
 
         x_start = np.min(misclassified_data[:,0])
@@ -314,34 +432,64 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
 
         list_comp_aux_blocks = []
         comp_zstd_size = 0
+        data_partition_idx = (misclassified_data[:, 0] - x_start) // num_record_per_part
         for block_idx in tqdm(range(num_partition)):
-            val_start, val_end = x_start + block_idx*num_record_per_part, x_start + (block_idx+1)*num_record_per_part
-            data_idx = np.logical_and(misclassified_data[:, 0] >= val_start, misclassified_data[:, 0] < val_end)
+            # val_start, val_end = x_start + block_idx*num_record_per_part, x_start + (block_idx+1)*num_record_per_part
+            data_idx = data_partition_idx == block_idx
+            # data_idx = np.logical_and(misclassified_data[:, 0] >= val_start, misclassified_data[:, 0] < val_end)
             data_part = misclassified_data[data_idx]
+            if search_algo == 'binary_c':
+                dict_contigous_key[block_idx] = np.array(data_part[:, 0], order='F').astype(np.int32)
+
             if len(data_part) == 0:
                 continue
             data_bytes = data_part.tobytes()
-            data_zstd_comp = zstd.compress(data_bytes,1)
+            data_zstd_comp = zstd.compress(data_bytes)
             list_comp_aux_blocks.append(data_zstd_comp)
             comp_zstd_size += sys.getsizeof(data_zstd_comp)/1024/1024
             file_name = os.path.join(comp_data_dir, str(block_idx) + '.data')
             ndb_utils.save_byte_to_disk(file_name, data_zstd_comp)
 
         data_ori_size = data_ori.nbytes/1024/1024
-        data_comp_size = [size_encoder, comp_zstd_size, model.count_params()*4/1024/1024, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
+        data_comp_size = [size_encoder, comp_zstd_size, model_size, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
         print('Ori Size: {}, Curr Size: {}'.format(data_ori.nbytes/1024/1024, data_comp_size))
-        np.save(os.path.join(comp_data_dir, 'num_record_per_part'), num_record_per_part)
+        x = df[df_key[0]].values.astype(np.int32)
+        max_len = len(str(np.max(x)))
+        x_start = np.min(x)
+        x_end = np.max(x)
+
+        exp_data_dict['num_record_per_part'] = num_record_per_part 
+        exp_data_dict['data_ori_size'] = data_ori_size
+        exp_data_dict['data_comp_size'] = [size_encoder, comp_zstd_size, model_size, sys.getsizeof(zstd.compress(exist_bit_arr.tobytes()))/1024/1024]
+        exp_data_dict['max_len'] = max_len 
+        exp_data_dict['x_start'] = x_start 
+        exp_data_dict['x_end'] = x_end 
+        ndb_utils.save_byte_to_disk(os.path.join(comp_data_dir, 'exist_bit_arr.data'), zstd.compress(exist_bit_arr.tobytes()))
+        ndb_utils.save_obj_to_disk_with_pickle(os.path.join(comp_data_dir, 'extra_meta.data'), exp_data_dict)
+        list_sample_index = ndb_utils.generate_query(x_start, x_end, num_query=num_query, sample_size=sample_size)
+        
     else:
-        num_record_per_part = np.load(os.path.join(comp_data_dir, 'num_record_per_part.npy'))  
+        exist_bit_arr = bitarray()
+        exist_bit_arr.frombytes(zstd.decompress(ndb_utils.read_bytes_from_disk(os.path.join(comp_data_dir, 'exist_bit_arr.data'))))
+
+        exp_data_dict = ndb_utils.load_obj_from_disk_with_pickle(os.path.join(comp_data_dir, 'extra_meta.data'))
+        num_record_per_part = exp_data_dict['num_record_per_part']
+        data_ori_size = exp_data_dict['data_ori_size']
+        data_comp_size = exp_data_dict['data_comp_size']
+        max_len = exp_data_dict['max_len']
+        x_start = exp_data_dict['x_start']
+        x_end = exp_data_dict['x_end']
+        list_y_encoder = exp_data_dict['list_y_encoder']
+        num_tasks = exp_data_dict['num_tasks']
+        size_encoder = exp_data_dict['size_encoder']
+        list_sample_index = ndb_utils.load_obj_from_disk_with_pickle(os.path.join(root_path, task_name, 'sample_index_{}.data'.format(sample_size)))
     
-    x = df[df_key[0]].values.astype(np.int32)
-    max_len = len(str(np.max(x)))
-    x_start = np.min(x)
-    x_end = np.max(x)
+    data_ori = data_ori[:2]
+    del df 
+    gc.collect() 
     shared_utils.create_fetures.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int]
     shared_utils.create_fetures_mutlt_thread_mgr.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int32, ctypes.c_int32]
     shared_utils.create_fetures_mutlt_thread_mgr.restype = ctypes.POINTER(ctypes.c_bool * (sample_size * max_len * 10))
-    list_sample_index = ndb_utils.generate_query(x_start, x_end, num_query=num_query, sample_size=sample_size)
     # Measure latency for run-time memory optimzed strategy
     if memory_optimized:
         timer_creatfeatures = ndb_utils.Timer()
@@ -378,9 +526,11 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                 timer_sort.tic()
                 sample_index_sorted = np.sort(sample_index)
                 sample_index_argsort = np.argsort(sample_index)
+                sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
+                sample_index_partition = sample_index_partition.astype(np.int32)
                 t_sort += timer_sort.toc()               
                 timer_creatfeatures.tic()               
-                result = np.recarray((sample_size, ), dtype=data_ori.dtype)
+                result = np.ndarray((sample_size, ), dtype=data_ori.dtype)
                 result[df_key[0]] = sample_index
                 x_features_arr = np.zeros(sample_size * max_len * 10, dtype=bool)
                 x_features_arr_ptr = shared_utils.create_fetures_mutlt_thread_mgr(
@@ -390,11 +540,14 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                 t_createfeatures += timer_creatfeatures.toc()
                 # ---------
                 timer_nn.tic()
-                y_nn_pred = model(sampled_features)
+                if backend == 'tf':
+                    y_nn_pred = model(sampled_features)
+                elif backend == 'onnx':
+                    y_nn_pred = model.run(None, {input_name: np.expand_dims(sampled_features, -1).astype(np.float32)})
                 for i in range(num_tasks):
                     if num_tasks == 1:
                         col_name = data_ori.dtype.names[i+1]
-                        result[col_name] = np.argmax(y_nn_pred, axis=1)
+                        result[col_name] = np.argmax(y_nn_pred[0], axis=1)
                     else:
                         col_name = data_ori.dtype.names[i+1]
                         result[col_name] = np.argmax(y_nn_pred[i], axis=1)
@@ -414,7 +567,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                         # misclassified lookup
                         t_exist_lookup += timer_exist_lookup.toc()
                         timer_locate_part.tic()
-                        part_idx = int((query_key - x_start) // num_record_per_part)
+                        part_idx = sample_index_partition[idx]
                         t_locate_part += timer_locate_part.toc()
                         timer_decomp.tic()
 
@@ -424,7 +577,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                                 continue
                             block_zstd_comp = ndb_utils.read_bytes_from_disk(file_name)
                             current_memory = sys.getsizeof(block_zstd_comp)
-                            data_uncomp = np.frombuffer(zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
+                            data_uncomp = np.frombuffer(zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1)
 
                             decomp_aux_block = data_uncomp
                             num_decomp += 1
@@ -455,7 +608,7 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         peak_memory += exist_bit_arr.nbytes
         memory_optimized_result = result.copy()
         memory_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 0, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop,
-      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model.count_params()*4/1024/1024)).T
+      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model_size)).T
 
     # Measure latency for end-end latency optimzed strategy
     if latency_optimized: 
@@ -482,11 +635,13 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
         block_bytes_size = 0
         timer_total.tic()
         for _ in tqdm(range(num_loop)):
+            partition_hit = dict()
             decomp_aux_block = dict()
             num_decomp = 0
             count_nonexist = 0
             peak_memory = 0
             cache_block_memory = 0
+            gc.collect()
 
             # build hash table
             if search_algo == 'hash':
@@ -497,29 +652,63 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                 timer_sort.tic()
                 sample_index_sorted = np.sort(sample_index)
                 sample_index_argsort = np.argsort(sample_index)
-                t_sort += timer_sort.toc()                              
-                timer_creatfeatures.tic()        
-                result = np.recarray((sample_size, ), dtype=data_ori.dtype)
+                sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
+                sample_index_partition = sample_index_partition.astype(np.int32)
+                t_sort += timer_sort.toc()     
+                result = np.ndarray((sample_size, ), dtype=data_ori.dtype)
                 result[df_key[0]] = sample_index
-                x_features_arr = np.zeros(sample_size * max_len * 10, dtype=bool)
-                x_features_arr_ptr = shared_utils.create_fetures_mutlt_thread_mgr(
-                    x_features_arr, sample_index, sample_size, max_len, num_threads)
-                sampled_features = np.frombuffer(
-                    x_features_arr_ptr.contents, dtype=bool).reshape(sample_size, -1)
-                # sampled_features = ndb_utils.create_features(sample_index, max_len)[0]
+                if mode == 'edge':
+                    edge_batch_size = 5000
+                    timer_creatfeatures.tic()        
+                    inference_generator = InferenceDataGenerator(sample_index, edge_batch_size, max_len)
+                    for idx, (x_sub) in enumerate(inference_generator):
+                        t_createfeatures += timer_creatfeatures.toc()
+                        timer_nn.tic()
+                        if backend == 'tf':
+                            y_nn_pred = model(x_sub)
+                        elif backend == 'onnx':
+                            y_nn_pred = model.run(None, {input_name: np.expand_dims(x_sub, -1).astype(np.float32)})
+                        
+                        for i in range(num_tasks):
+                            if num_tasks == 1 and backend == 'onnx':
+                                col_name = data_ori.dtype.names[i+1]
+                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[0], axis=1)
+                            elif num_tasks == 1 and backend == 'tf':
+                                col_name = data_ori.dtype.names[i+1]
+                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred, axis=1)
+                            else:
+                                col_name = data_ori.dtype.names[i+1]
+                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[i], axis=1)
+                        t_nn += timer_nn.toc()
+                        timer_creatfeatures.tic()  
 
-                t_createfeatures += timer_creatfeatures.toc()
-                timer_nn.tic()
-                y_nn_pred = model(sampled_features)
-                
-                for i in range(num_tasks):
-                    if num_tasks == 1:
-                        col_name = data_ori.dtype.names[i+1]
-                        result[col_name] = np.argmax(y_nn_pred, axis=1)
-                    else:
-                        col_name = data_ori.dtype.names[i+1]
-                        result[col_name] = np.argmax(y_nn_pred[i], axis=1)
-                t_nn += timer_nn.toc()
+                else:                         
+                    timer_creatfeatures.tic()        
+                    
+                    x_features_arr = np.zeros(sample_size * max_len * 10, dtype=bool)
+                    x_features_arr_ptr = shared_utils.create_fetures_mutlt_thread_mgr(
+                        x_features_arr, sample_index, sample_size, max_len, num_threads)
+                    sampled_features = np.frombuffer(
+                        x_features_arr_ptr.contents, dtype=bool).reshape(sample_size, -1)
+                    # sampled_features = ndb_utils.create_features(sample_index, max_len)[0]
+                    t_createfeatures += timer_creatfeatures.toc()
+                    timer_nn.tic()
+                    if backend == 'tf':
+                        y_nn_pred = model(sampled_features)
+                    elif backend == 'onnx':
+                        y_nn_pred = model.run(None, {input_name: np.expand_dims(sampled_features, -1).astype(np.float32)})
+                    
+                    for i in range(num_tasks):
+                        if num_tasks == 1 and backend == 'onnx':
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name] = np.argmax(y_nn_pred[0], axis=1)
+                        elif num_tasks == 1 and backend == 'tf':
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name] = np.argmax(y_nn_pred, axis=1)
+                        else:
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name] = np.argmax(y_nn_pred[i], axis=1)
+                    t_nn += timer_nn.toc()
                 
                 for idx, val in enumerate(sample_index):
                     # ------ non exist look up
@@ -536,24 +725,38 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                         # misclassified lookup
                         t_exist_lookup += timer_exist_lookup.toc()
                         timer_locate_part.tic()
-                        part_idx = int((query_key - x_start) // num_record_per_part)
-                        
+                        part_idx = sample_index_partition[idx]
                         t_locate_part += timer_locate_part.toc()
                         timer_decomp.tic()
 
                         if part_idx not in decomp_aux_block:
-                            file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')
+                            if mode == 'edge':
+                                available_memory = ndb_utils.get_available_memory()
+                                if available_memory < 1024*1024*100:
+                                    # memory not eneough, free some memory
+                                    decomp_aux_block = ndb_utils.evict_unused_partition(decomp_aux_block, partition_hit, free_memory=1024*1024*100)
+
+                            partition_hit[part_idx] = 1
+
+
+                            file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')                           
+
                             if not os.path.exists(file_name):
                                 continue
                             block_zstd_comp = ndb_utils.read_bytes_from_disk(file_name)
                             data_uncomp = np.frombuffer(
-                            zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
-                            decomp_aux_block[part_idx] = data_uncomp
+                            # zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
+                            zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1)
+                            # decomp_aux_block[part_idx] = data_uncomp
+                            try:
+                                decomp_aux_block[part_idx] = data_uncomp
+                            except:
+                                decomp_aux_block = dict()
+                                decomp_aux_block[part_idx] = data_uncomp
                             num_decomp += 1
                             block_bytes_size = sys.getsizeof(block_zstd_comp)
                             prev_part_idx = part_idx
 
-                            # TODO add size computation for hash approach
                             if search_algo == 'hash':
                                 t_decomp += timer_decomp.toc()
                                 timer_build_index.tic()
@@ -569,10 +772,10 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                                 cache_block_memory += data_uncomp.nbytes 
                         else:
                             data_uncomp = decomp_aux_block[part_idx]
+                            partition_hit[part_idx] +=1
                         t_decomp += timer_decomp.toc()    
                         timer_aux_lookup.tic()
                         if search_algo == 'binary':
-                            # TODO code can be optimized at revision stage
                             data_idx = ndb_utils.binary_search(data_uncomp[:,0], query_key, len(data_uncomp))
                             if data_idx != -1:
                                 result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
@@ -600,11 +803,12 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
                     result[col_name] = fun_a(result[col_name].astype(np.int32))
                 t_remap += timer_remap.toc()
                 t_total += timer_total.toc()
-
+            latency_optimized_result = result.copy()
+            del result
+            gc.collect()
         peak_memory += exist_bit_arr.nbytes
-        latency_optimized_result = result.copy()
         latency_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop, t_build_index / num_loop,
-      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model.count_params()*4/1024/1024)).T
+      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model_size)).T
 
     return_latency = None 
     if memory_optimized_latency is None and latency_optimized_latency is not None:

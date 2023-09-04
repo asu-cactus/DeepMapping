@@ -1,9 +1,11 @@
+import ctypes
+import gc
+import math
 import numpy as np
+import os
 import sys
 import zstd
-import math
-import os
-import ctypes
+from collections import defaultdict
 from DeepMapping import ndb_utils
 from tqdm.auto import tqdm
 
@@ -21,8 +23,6 @@ shared_utils.aux_look_up_bin.restype = ctypes.c_long
 def measure_latency(df, data_ori, task_name, sample_size, 
                     generate_file=True, memory_optimized=True, latency_optimized=True,
                     num_loop=10, num_query=5, search_algo='binary', block_size=1024*1024):
-    # TODO add support for run-time memory optimized strategy
-    # TODO add support of binary_c to run-time memory optimized strategy
     """Measure the end-end latency of data query
 
     Args:
@@ -49,12 +49,14 @@ def measure_latency(df, data_ori, task_name, sample_size,
         path_to_model : str
             load model from custom path
     """
+    mode = os.environ['MODE']
     data_ori_size = 0
     data_comp_size = 0
     memory_optimized_latency = None 
     latency_optimized_latency = None 
     memory_optimized_result = None
     latency_optimized_result = None
+    exp_data_dict = dict()
     key = df.columns[0]
     # block_size = 1024 * 1024
     # block_size = 1024 * 512
@@ -70,6 +72,9 @@ def measure_latency(df, data_ori, task_name, sample_size,
     task_name = task_name
     folder_name = 'zstd'
     comp_data_dir = os.path.join(root_path, task_name, folder_name)
+    
+    if 'DATA_OPS' in os.environ:
+        comp_data_dir = os.path.join(comp_data_dir, os.environ['DATA_OPS'])
     print('[Generate File Path]: {}'.format(comp_data_dir))
 
     dict_contigous_key = dict() 
@@ -86,7 +91,6 @@ def measure_latency(df, data_ori, task_name, sample_size,
             data_part = data_ori[data_idx]
 
             if search_algo == 'binary_c':
-                # FIXME temporary workaround to avoid the overhead of converting to contiguous array
                 dict_contigous_key[block_idx] = np.array(data_part[key], order='F').astype(np.int32)
 
             if len(data_part) == 0:
@@ -99,8 +103,21 @@ def measure_latency(df, data_ori, task_name, sample_size,
         data_ori_size = data_ori.nbytes/1024/1024
         data_comp_size = data_size/1024/1024            
         print('Ori Size: {}, Curr Size: {}'.format(data_ori.nbytes/1024/1024, data_size/1024/1024))
-    
-    list_sample_index = ndb_utils.generate_query(x_start, x_end, num_query=num_query, sample_size=sample_size)
+        exp_data_dict['num_record_per_part'] = num_record_per_part 
+        exp_data_dict['data_ori_size'] = data_ori_size
+        exp_data_dict['data_comp_size'] = data_comp_size
+        exp_data_dict['x_start'] = x_start 
+        exp_data_dict['x_end'] = x_end 
+        ndb_utils.save_obj_to_disk_with_pickle(os.path.join(comp_data_dir, 'extra_meta.data'), exp_data_dict)
+        list_sample_index = ndb_utils.generate_query(x_start, x_end, num_query=num_query, sample_size=sample_size)
+    else:
+        exp_data_dict = ndb_utils.load_obj_from_disk_with_pickle(os.path.join(comp_data_dir, 'extra_meta.data'))
+        num_record_per_part = exp_data_dict['num_record_per_part']
+        data_ori_size = exp_data_dict['data_ori_size']
+        data_comp_size = exp_data_dict['data_comp_size']
+        x_start = exp_data_dict['x_start']
+        x_end = exp_data_dict['x_end']
+        list_sample_index = ndb_utils.load_obj_from_disk_with_pickle(os.path.join(root_path, task_name, 'sample_index_{}.data'.format(sample_size)))
 
     # Measure latency for run-time memory optimized strategy
     if memory_optimized:
@@ -128,7 +145,7 @@ def measure_latency(df, data_ori, task_name, sample_size,
                 sample_index_sorted = np.sort(sample_index)
                 sample_index_argsort = np.argsort(sample_index)
                 t_sort += timer_sort.toc()
-                result = np.recarray((sample_size,), dtype=data_ori.dtype)
+                result = np.ndarray((sample_size,), dtype=data_ori.dtype)
 
                 for idx in range(sample_size):
                     timer_locate_part.tic() 
@@ -142,7 +159,7 @@ def measure_latency(df, data_ori, task_name, sample_size,
                         # new block to decompress
                         file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')
                         block_bytes = ndb_utils.read_bytes_from_disk(file_name)
-                        curr_decomp_block = np.rec.array(zstd.decompress(block_bytes), dtype=data_ori.dtype)
+                        curr_decomp_block = np.frombuffer(zstd.decompress(block_bytes), dtype=data_ori.dtype)
                         decomp_block = curr_decomp_block
                         num_decomp += 1
                         current_memory = sys.getsizeof(block_bytes)
@@ -192,10 +209,12 @@ def measure_latency(df, data_ori, task_name, sample_size,
 
         for _ in tqdm(range(num_loop)):  
             decomp_block = dict()
+            partition_hit = dict()
             peak_memory = 0
             num_decomp = 0
             count_nonexist = 0
             cache_block_memory = 0
+            gc.collect()
 
             # build hash table
             if search_algo == 'hash':
@@ -207,22 +226,35 @@ def measure_latency(df, data_ori, task_name, sample_size,
                 timer_sort.tic()
                 sample_index_sorted = np.sort(sample_index)
                 sample_index_argsort = np.argsort(sample_index)
+                sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
+                sample_index_partition = sample_index_partition.astype(np.int32)
                 t_sort += timer_sort.toc()
-                result = np.recarray((sample_size,), dtype=data_ori.dtype)
+                result = np.ndarray((sample_size,), dtype=data_ori.dtype)
                 result_idx = 0
                 for idx in range(sample_size):
-                    timer_locate_part.tic()  
                     query_key = sample_index_sorted[idx]
                     query_key_index_in_old = sample_index_argsort[idx] 
+                    timer_locate_part.tic()  
+                    part_idx = sample_index_partition[idx]
                     t_locate_part += timer_locate_part.toc()
-                    part_idx = int((query_key-x_start) // num_record_per_part)
                     timer_decomp.tic()
 
                     if part_idx not in decomp_block:
+                        if mode == 'edge':
+                            available_memory = ndb_utils.get_available_memory()
+                            if available_memory < 1024*1024*100:
+                                # memory not eneough, free some memory
+                                decomp_block = ndb_utils.evict_unused_partition(decomp_block, partition_hit, free_memory=1024*1024*100)
+
+                        partition_hit[part_idx] =1
                         file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')
                         block_bytes = ndb_utils.read_bytes_from_disk(file_name)
-                        curr_decomp_block = np.rec.array(zstd.decompress(block_bytes), dtype=data_ori.dtype)
-                        decomp_block[part_idx] = curr_decomp_block
+                        curr_decomp_block = np.frombuffer(zstd.decompress(block_bytes), dtype=data_ori.dtype)
+                        try:
+                            decomp_block[part_idx] = curr_decomp_block
+                        except:
+                            decomp_block = dict()
+                            decomp_block[part_idx] = curr_decomp_block
                         num_decomp += 1
                         block_bytes_size = sys.getsizeof(block_bytes)
 
@@ -241,6 +273,7 @@ def measure_latency(df, data_ori, task_name, sample_size,
                             cache_block_memory += curr_decomp_block.nbytes 
                     else:
                         curr_decomp_block = decomp_block[part_idx]
+                        partition_hit[part_idx] +=1
                     t_decomp += timer_decomp.toc()
                     timer_lookup.tic()
 
@@ -255,9 +288,9 @@ def measure_latency(df, data_ori, task_name, sample_size,
                         data_idx = query_key in data_hash.keys()      
 
                     if ((search_algo == 'binary' or search_algo =='binary_c') and data_idx >= 0) or (search_algo == 'naive' and np.sum(data_idx) > 0):
-                        result[query_key_index_in_old] = curr_decomp_block[data_idx]
+                        result[query_key_index_in_old] = tuple(curr_decomp_block[data_idx])
                     elif search_algo == 'hash' and data_idx == True:
-                        result[query_key_index_in_old] = data_hash[query_key]
+                        result[query_key_index_in_old] = tuple(data_hash[query_key])
                     else:
                         count_nonexist += 1
                     t_lookup += timer_lookup.toc()
@@ -266,7 +299,11 @@ def measure_latency(df, data_ori, task_name, sample_size,
                     if cache_block_memory + block_bytes_size > peak_memory:
                         peak_memory = cache_block_memory + block_bytes_size
                 t_total += timer_total.toc()
-        latency_optimized_result = result.copy()
+            latency_optimized_result = result.copy()
+            del result 
+            del decomp_block
+            del partition_hit
+            gc.collect()
         latency_optimized_latency = np.array((data_ori_size, data_comp_size, sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, 
         t_locate_part / num_loop, t_decomp / num_loop, t_build_index / num_loop,
         t_lookup / num_loop, t_total / num_loop, num_decomp, count_nonexist)).T
