@@ -8,7 +8,7 @@ from DeepMapping.ndb_utils import df_preprocess
 from DeepMapping.benchmark_utils import benchmark_handler
 
 list_dataset = ['tpch-s1/customer', 'tpch-s1/lineitem', 'tpch-s1/orders', 'tpch-s1/part', 'tpch-s1/supplier']
-list_benchmark = ['uncompress', 'dgpe', 'delta', 'byte_dictionary', 'lzo', 'zstd', 'rle', 'deepmapping']
+list_benchmark = ['uncompress', 'zstd', 'deepmapping', 'hashtable', 'hashtable_with_compression']
 list_sample_size = [1000, 10000]
 list_run_config = list(itertools.product(list_dataset, list_benchmark, list_sample_size))
 print('[Config]: \n\t Dataset: {} \n\t Benchmark: {} \n\t Sample Size: {}'.format(list_dataset, list_benchmark, list_sample_size))

@@ -329,12 +329,12 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
 
     if path_to_model is None:
         if backend == 'tf':
-            model = tf.keras.models.load_model('models2/nas/{}.h5'.format(task_name), compile=False)
+            model = tf.keras.models.load_model('models/nas/{}.h5'.format(task_name), compile=False)
             model_size = model.count_params()*4/1024/1024
         elif backend == 'onnx': 
-            model = ort.InferenceSession('models2/nas/{}.onnx'.format(task_name), providers=['CUDAExecutionProvider']) 
+            model = ort.InferenceSession('models/nas/{}.onnx'.format(task_name), providers=['CUDAExecutionProvider']) 
             input_name = model.get_inputs()[0].name
-            model_size = calculate_params(onnx.load_model('models2/nas/{}.onnx'.format(task_name)))*4/1024/1024
+            model_size = calculate_params(onnx.load_model('models/nas/{}.onnx'.format(task_name)))*4/1024/1024
     else:
         if backend == 'tf':
             model = tf.keras.models.load_model(path_to_model, compile=False)

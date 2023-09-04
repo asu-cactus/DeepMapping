@@ -9,3 +9,5 @@
 **.tbl
 **/.vscode
 **/DeepMapping.egg-info
+**.7z
+**.onnx
