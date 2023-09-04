@@ -255,7 +255,7 @@ def finetune_model(df, model_path, batch_size=1024, num_epochs=500, train_verbos
         return model, train_generator
 
 def measure_latency_any(df, data_ori, task_name, sample_size, 
-                    generate_file=True, memory_optimized=True, latency_optimized=True,
+                    generate_file=True,
                     num_loop=10, num_query=5, search_algo='binary', path_to_model=None,
                     block_size=1024*1024):
     """Measure the end-end latency of data query
@@ -271,10 +271,6 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
             number of queried data per query
         generate_file : bool
             whether need to store the data to disk
-        memory_optimized : bool
-            whether measure the end-end latency with the run-time memory optimized strategy
-        latency_optimized : bool
-            whether measure the end-end latency with the latency optimized strategy
         num_loop : int
             number of loops to run for measuring the latency
         num_query : int
@@ -490,325 +486,204 @@ def measure_latency_any(df, data_ori, task_name, sample_size,
     shared_utils.create_fetures.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int]
     shared_utils.create_fetures_mutlt_thread_mgr.argtypes = [ND_POINTER_1, ND_POINTER_2, ctypes.c_long, ctypes.c_int32, ctypes.c_int32]
     shared_utils.create_fetures_mutlt_thread_mgr.restype = ctypes.POINTER(ctypes.c_bool * (sample_size * max_len * 10))
-    # Measure latency for run-time memory optimzed strategy
-    if memory_optimized:
-        timer_creatfeatures = ndb_utils.Timer()
-        timer_nn = ndb_utils.Timer()
-        timer_aux_lookup = ndb_utils.Timer()
-        timer_total = ndb_utils.Timer()
-        timer_decomp = ndb_utils.Timer()
-        timer_exist_lookup = ndb_utils.Timer()
-        timer_sort = ndb_utils.Timer()
-        timer_remap = ndb_utils.Timer()
-        timer_locate_part = ndb_utils.Timer()
-        t_remap = 0
-        t_locate_part = 0
-        t_decomp = 0
-        t_createfeatures = 0
-        t_aux_lookup = 0
-        t_nn = 0
-        t_exist_lookup = 0
-        t_total = 0
-        t_sort = 0
-        peak_memory = -1
-        block_bytes_size = 0
+   
+    timer_creatfeatures = ndb_utils.Timer()
+    timer_locate_part = ndb_utils.Timer()
+    timer_nn = ndb_utils.Timer()
+    timer_aux_lookup = ndb_utils.Timer()
+    timer_total = ndb_utils.Timer()
+    timer_decomp = ndb_utils.Timer()
+    timer_exist_lookup = ndb_utils.Timer()
+    timer_remap = ndb_utils.Timer()
+    timer_sort = ndb_utils.Timer()
+    timer_build_index = ndb_utils.Timer()
+    t_remap = 0
+    t_decomp = 0
+    t_createfeatures = 0
+    t_aux_lookup = 0
+    t_nn = 0
+    t_exist_lookup = 0
+    t_total = 0
+    t_sort = 0
+    t_locate_part = 0
+    t_build_index = 0
+    block_bytes_size = 0
+    timer_total.tic()
+    for _ in tqdm(range(num_loop)):
+        partition_hit = dict()
+        decomp_aux_block = dict()
+        num_decomp = 0
+        count_nonexist = 0
+        peak_memory = 0
+        cache_block_memory = 0
+        gc.collect()
 
-        timer_total.tic()
-        for _ in tqdm(range(num_loop)):
-            decomp_aux_block = None
-            num_decomp = 0
-            count_nonexist = 0
-            prev_part_idx = None
-            
-            for query_idx in range(num_query):
-                sample_index = list_sample_index[query_idx]              
-                timer_total.tic()                                      
-                timer_sort.tic()
-                sample_index_sorted = np.sort(sample_index)
-                sample_index_argsort = np.argsort(sample_index)
-                sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
-                sample_index_partition = sample_index_partition.astype(np.int32)
-                t_sort += timer_sort.toc()               
-                timer_creatfeatures.tic()               
-                result = np.ndarray((sample_size, ), dtype=data_ori.dtype)
-                result[df_key[0]] = sample_index
+        # build hash table
+        if search_algo == 'hash':
+            data_hash = dict()
+        for query_idx in range(num_query):
+            sample_index = list_sample_index[query_idx]                
+            timer_total.tic()                
+            timer_sort.tic()
+            sample_index_sorted = np.sort(sample_index)
+            sample_index_argsort = np.argsort(sample_index)
+            sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
+            sample_index_partition = sample_index_partition.astype(np.int32)
+            t_sort += timer_sort.toc()     
+            result = np.ndarray((sample_size, ), dtype=data_ori.dtype)
+            result[df_key[0]] = sample_index
+            if mode == 'edge':
+                edge_batch_size = 5000
+                timer_creatfeatures.tic()        
+                inference_generator = InferenceDataGenerator(sample_index, edge_batch_size, max_len)
+                for idx, (x_sub) in enumerate(inference_generator):
+                    t_createfeatures += timer_creatfeatures.toc()
+                    timer_nn.tic()
+                    if backend == 'tf':
+                        y_nn_pred = model(x_sub)
+                    elif backend == 'onnx':
+                        y_nn_pred = model.run(None, {input_name: np.expand_dims(x_sub, -1).astype(np.float32)})
+                    
+                    for i in range(num_tasks):
+                        if num_tasks == 1 and backend == 'onnx':
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[0], axis=1)
+                        elif num_tasks == 1 and backend == 'tf':
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred, axis=1)
+                        else:
+                            col_name = data_ori.dtype.names[i+1]
+                            result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[i], axis=1)
+                    t_nn += timer_nn.toc()
+                    timer_creatfeatures.tic()  
+
+            else:                         
+                timer_creatfeatures.tic()        
+                
                 x_features_arr = np.zeros(sample_size * max_len * 10, dtype=bool)
                 x_features_arr_ptr = shared_utils.create_fetures_mutlt_thread_mgr(
                     x_features_arr, sample_index, sample_size, max_len, num_threads)
                 sampled_features = np.frombuffer(
                     x_features_arr_ptr.contents, dtype=bool).reshape(sample_size, -1)
+                # sampled_features = ndb_utils.create_features(sample_index, max_len)[0]
                 t_createfeatures += timer_creatfeatures.toc()
-                # ---------
                 timer_nn.tic()
                 if backend == 'tf':
                     y_nn_pred = model(sampled_features)
                 elif backend == 'onnx':
                     y_nn_pred = model.run(None, {input_name: np.expand_dims(sampled_features, -1).astype(np.float32)})
+                
                 for i in range(num_tasks):
-                    if num_tasks == 1:
+                    if num_tasks == 1 and backend == 'onnx':
                         col_name = data_ori.dtype.names[i+1]
                         result[col_name] = np.argmax(y_nn_pred[0], axis=1)
+                    elif num_tasks == 1 and backend == 'tf':
+                        col_name = data_ori.dtype.names[i+1]
+                        result[col_name] = np.argmax(y_nn_pred, axis=1)
                     else:
                         col_name = data_ori.dtype.names[i+1]
                         result[col_name] = np.argmax(y_nn_pred[i], axis=1)
                 t_nn += timer_nn.toc()
-                for idx, val in enumerate(sample_index_sorted):
-                    # ------ non exist look up
-                    timer_exist_lookup.tic()
-                    query_key = sample_index_sorted[idx]
-                    query_key_index_in_old = sample_index_argsort[idx]
-                    exist_flag = exist_bit_arr[query_key-x_start] == 1
+            
+            for idx, val in enumerate(sample_index):
+                # ------ non exist look up
+                timer_exist_lookup.tic()
+                query_key = sample_index_sorted[idx]
+                query_key_index_in_old = sample_index_argsort[idx]
+                exist_flag = exist_bit_arr[query_key-x_start] == 1
+
+                if not exist_flag:
+                    result[query_key_index_in_old] = -1
+                    count_nonexist += 1
                     t_exist_lookup += timer_exist_lookup.toc()
-                    if not exist_flag:
-                        result[idx] = -1
-                        count_nonexist += 1
-                        t_exist_lookup += timer_exist_lookup.toc()
-                    else:
-                        # misclassified lookup
-                        t_exist_lookup += timer_exist_lookup.toc()
-                        timer_locate_part.tic()
-                        part_idx = sample_index_partition[idx]
-                        t_locate_part += timer_locate_part.toc()
-                        timer_decomp.tic()
+                else:
+                    # misclassified lookup
+                    t_exist_lookup += timer_exist_lookup.toc()
+                    timer_locate_part.tic()
+                    part_idx = sample_index_partition[idx]
+                    t_locate_part += timer_locate_part.toc()
+                    timer_decomp.tic()
 
-                        if part_idx != prev_part_idx:
-                            file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')
-                            if not os.path.exists(file_name):
-                                continue
-                            block_zstd_comp = ndb_utils.read_bytes_from_disk(file_name)
-                            current_memory = sys.getsizeof(block_zstd_comp)
-                            data_uncomp = np.frombuffer(zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1)
+                    if part_idx not in decomp_aux_block:
+                        if mode == 'edge':
+                            available_memory = ndb_utils.get_available_memory()
+                            if available_memory < 1024*1024*100:
+                                # memory not eneough, free some memory
+                                decomp_aux_block = ndb_utils.evict_unused_partition(decomp_aux_block, partition_hit, free_memory=1024*1024*100)
 
-                            decomp_aux_block = data_uncomp
-                            num_decomp += 1
-                            current_memory += data_uncomp.nbytes
-                            prev_part_idx = part_idx
-                            if current_memory > peak_memory:
-                                peak_memory = current_memory
+                        partition_hit[part_idx] = 1
 
+
+                        file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')                           
+
+                        if not os.path.exists(file_name):
+                            continue
+                        block_zstd_comp = ndb_utils.read_bytes_from_disk(file_name)
+                        data_uncomp = np.frombuffer(
+                        # zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
+                        zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1)
+                        # decomp_aux_block[part_idx] = data_uncomp
+                        try:
+                            decomp_aux_block[part_idx] = data_uncomp
+                        except:
+                            decomp_aux_block = dict()
+                            decomp_aux_block[part_idx] = data_uncomp
+                        num_decomp += 1
+                        block_bytes_size = sys.getsizeof(block_zstd_comp)
+                        prev_part_idx = part_idx
+
+                        if search_algo == 'hash':
+                            t_decomp += timer_decomp.toc()
+                            timer_build_index.tic()
+                            for block_data_idx in range(len(data_uncomp)):
+                                data_entry_key = data_uncomp[block_data_idx, 0]
+                                # print(data_entry_key)
+                                data_entry_val = data_uncomp[block_data_idx]
+                                data_hash[data_entry_key] = data_entry_val   
+                            cache_block_memory = sys.getsizeof(data_hash)
+                            t_build_index += timer_build_index.toc()
+                            timer_decomp.tic()
                         else:
-                            data_uncomp = decomp_aux_block
-                        
-                        t_decomp += timer_decomp.toc()                       
-                        timer_aux_lookup.tic()
+                            cache_block_memory += data_uncomp.nbytes 
+                    else:
+                        data_uncomp = decomp_aux_block[part_idx]
+                        partition_hit[part_idx] +=1
+                    t_decomp += timer_decomp.toc()    
+                    timer_aux_lookup.tic()
+                    if search_algo == 'binary':
+                        data_idx = ndb_utils.binary_search(data_uncomp[:,0], query_key, len(data_uncomp))
+                        if data_idx != -1:
+                            result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
+                        else:
+                            count_nonexist += 1
+                    elif search_algo == 'binary_c': 
                         data_idx = shared_utils.aux_look_up_bin(data_uncomp[:,0], query_key, len(data_uncomp))
                         if data_idx != -1:
                             result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
-                        t_aux_lookup += timer_aux_lookup.toc()
-                
-                timer_remap.tic()
-                for i in range(num_tasks):    
-                    col_name = data_ori.dtype.names[i+1]
-                    fun_a = lambda x: list_y_encoder[i].classes_[x]
-                    result[col_name] = fun_a(result[col_name].astype(np.int32))
-                t_remap += timer_remap.toc()
-                t_total += timer_total.toc()
-
-
-        peak_memory += exist_bit_arr.nbytes
-        memory_optimized_result = result.copy()
-        memory_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 0, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop,
-      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model_size)).T
-
-    # Measure latency for end-end latency optimzed strategy
-    if latency_optimized: 
-        timer_creatfeatures = ndb_utils.Timer()
-        timer_locate_part = ndb_utils.Timer()
-        timer_nn = ndb_utils.Timer()
-        timer_aux_lookup = ndb_utils.Timer()
-        timer_total = ndb_utils.Timer()
-        timer_decomp = ndb_utils.Timer()
-        timer_exist_lookup = ndb_utils.Timer()
-        timer_remap = ndb_utils.Timer()
-        timer_sort = ndb_utils.Timer()
-        timer_build_index = ndb_utils.Timer()
-        t_remap = 0
-        t_decomp = 0
-        t_createfeatures = 0
-        t_aux_lookup = 0
-        t_nn = 0
-        t_exist_lookup = 0
-        t_total = 0
-        t_sort = 0
-        t_locate_part = 0
-        t_build_index = 0
-        block_bytes_size = 0
-        timer_total.tic()
-        for _ in tqdm(range(num_loop)):
-            partition_hit = dict()
-            decomp_aux_block = dict()
-            num_decomp = 0
-            count_nonexist = 0
-            peak_memory = 0
-            cache_block_memory = 0
-            gc.collect()
-
-            # build hash table
-            if search_algo == 'hash':
-                data_hash = dict()
-            for query_idx in range(num_query):
-                sample_index = list_sample_index[query_idx]                
-                timer_total.tic()                
-                timer_sort.tic()
-                sample_index_sorted = np.sort(sample_index)
-                sample_index_argsort = np.argsort(sample_index)
-                sample_index_partition = (sample_index_sorted - x_start) // num_record_per_part
-                sample_index_partition = sample_index_partition.astype(np.int32)
-                t_sort += timer_sort.toc()     
-                result = np.ndarray((sample_size, ), dtype=data_ori.dtype)
-                result[df_key[0]] = sample_index
-                if mode == 'edge':
-                    edge_batch_size = 5000
-                    timer_creatfeatures.tic()        
-                    inference_generator = InferenceDataGenerator(sample_index, edge_batch_size, max_len)
-                    for idx, (x_sub) in enumerate(inference_generator):
-                        t_createfeatures += timer_creatfeatures.toc()
-                        timer_nn.tic()
-                        if backend == 'tf':
-                            y_nn_pred = model(x_sub)
-                        elif backend == 'onnx':
-                            y_nn_pred = model.run(None, {input_name: np.expand_dims(x_sub, -1).astype(np.float32)})
-                        
-                        for i in range(num_tasks):
-                            if num_tasks == 1 and backend == 'onnx':
-                                col_name = data_ori.dtype.names[i+1]
-                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[0], axis=1)
-                            elif num_tasks == 1 and backend == 'tf':
-                                col_name = data_ori.dtype.names[i+1]
-                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred, axis=1)
-                            else:
-                                col_name = data_ori.dtype.names[i+1]
-                                result[col_name][idx*edge_batch_size:(idx+1)*edge_batch_size] = np.argmax(y_nn_pred[i], axis=1)
-                        t_nn += timer_nn.toc()
-                        timer_creatfeatures.tic()  
-
-                else:                         
-                    timer_creatfeatures.tic()        
-                    
-                    x_features_arr = np.zeros(sample_size * max_len * 10, dtype=bool)
-                    x_features_arr_ptr = shared_utils.create_fetures_mutlt_thread_mgr(
-                        x_features_arr, sample_index, sample_size, max_len, num_threads)
-                    sampled_features = np.frombuffer(
-                        x_features_arr_ptr.contents, dtype=bool).reshape(sample_size, -1)
-                    # sampled_features = ndb_utils.create_features(sample_index, max_len)[0]
-                    t_createfeatures += timer_creatfeatures.toc()
-                    timer_nn.tic()
-                    if backend == 'tf':
-                        y_nn_pred = model(sampled_features)
-                    elif backend == 'onnx':
-                        y_nn_pred = model.run(None, {input_name: np.expand_dims(sampled_features, -1).astype(np.float32)})
-                    
-                    for i in range(num_tasks):
-                        if num_tasks == 1 and backend == 'onnx':
-                            col_name = data_ori.dtype.names[i+1]
-                            result[col_name] = np.argmax(y_nn_pred[0], axis=1)
-                        elif num_tasks == 1 and backend == 'tf':
-                            col_name = data_ori.dtype.names[i+1]
-                            result[col_name] = np.argmax(y_nn_pred, axis=1)
                         else:
-                            col_name = data_ori.dtype.names[i+1]
-                            result[col_name] = np.argmax(y_nn_pred[i], axis=1)
-                    t_nn += timer_nn.toc()
-                
-                for idx, val in enumerate(sample_index):
-                    # ------ non exist look up
-                    timer_exist_lookup.tic()
-                    query_key = sample_index_sorted[idx]
-                    query_key_index_in_old = sample_index_argsort[idx]
-                    exist_flag = exist_bit_arr[query_key-x_start] == 1
+                            count_nonexist += 1
+                    elif search_algo == 'hash':
+                        if query_key in data_hash.keys():
+                            result[query_key_index_in_old] = tuple(data_hash[query_key])
 
-                    if not exist_flag:
-                        result[query_key_index_in_old] = -1
-                        count_nonexist += 1
-                        t_exist_lookup += timer_exist_lookup.toc()
-                    else:
-                        # misclassified lookup
-                        t_exist_lookup += timer_exist_lookup.toc()
-                        timer_locate_part.tic()
-                        part_idx = sample_index_partition[idx]
-                        t_locate_part += timer_locate_part.toc()
-                        timer_decomp.tic()
+                    t_aux_lookup += timer_aux_lookup.toc()    
 
-                        if part_idx not in decomp_aux_block:
-                            if mode == 'edge':
-                                available_memory = ndb_utils.get_available_memory()
-                                if available_memory < 1024*1024*100:
-                                    # memory not eneough, free some memory
-                                    decomp_aux_block = ndb_utils.evict_unused_partition(decomp_aux_block, partition_hit, free_memory=1024*1024*100)
+                if cache_block_memory + block_bytes_size > peak_memory:
+                    peak_memory = cache_block_memory + block_bytes_size
 
-                            partition_hit[part_idx] = 1
-
-
-                            file_name = os.path.join(comp_data_dir, str(part_idx) + '.data')                           
-
-                            if not os.path.exists(file_name):
-                                continue
-                            block_zstd_comp = ndb_utils.read_bytes_from_disk(file_name)
-                            data_uncomp = np.frombuffer(
-                            # zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1).copy(order='F')
-                            zstd.decompress(block_zstd_comp), dtype=np.int32).reshape(-1, num_tasks+1)
-                            # decomp_aux_block[part_idx] = data_uncomp
-                            try:
-                                decomp_aux_block[part_idx] = data_uncomp
-                            except:
-                                decomp_aux_block = dict()
-                                decomp_aux_block[part_idx] = data_uncomp
-                            num_decomp += 1
-                            block_bytes_size = sys.getsizeof(block_zstd_comp)
-                            prev_part_idx = part_idx
-
-                            if search_algo == 'hash':
-                                t_decomp += timer_decomp.toc()
-                                timer_build_index.tic()
-                                for block_data_idx in range(len(data_uncomp)):
-                                    data_entry_key = data_uncomp[block_data_idx, 0]
-                                    # print(data_entry_key)
-                                    data_entry_val = data_uncomp[block_data_idx]
-                                    data_hash[data_entry_key] = data_entry_val   
-                                cache_block_memory = sys.getsizeof(data_hash)
-                                t_build_index += timer_build_index.toc()
-                                timer_decomp.tic()
-                            else:
-                                cache_block_memory += data_uncomp.nbytes 
-                        else:
-                            data_uncomp = decomp_aux_block[part_idx]
-                            partition_hit[part_idx] +=1
-                        t_decomp += timer_decomp.toc()    
-                        timer_aux_lookup.tic()
-                        if search_algo == 'binary':
-                            data_idx = ndb_utils.binary_search(data_uncomp[:,0], query_key, len(data_uncomp))
-                            if data_idx != -1:
-                                result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
-                            else:
-                                count_nonexist += 1
-                        elif search_algo == 'binary_c': 
-                            data_idx = shared_utils.aux_look_up_bin(data_uncomp[:,0], query_key, len(data_uncomp))
-                            if data_idx != -1:
-                                result[query_key_index_in_old] = tuple(data_uncomp[data_idx])
-                            else:
-                                count_nonexist += 1
-                        elif search_algo == 'hash':
-                            if query_key in data_hash.keys():
-                                result[query_key_index_in_old] = tuple(data_hash[query_key])
-
-                        t_aux_lookup += timer_aux_lookup.toc()    
-
-                    if cache_block_memory + block_bytes_size > peak_memory:
-                        peak_memory = cache_block_memory + block_bytes_size
-
-                timer_remap.tic()
-                for i in range(num_tasks):    
-                    col_name = data_ori.dtype.names[i+1]
-                    fun_a = lambda x: list_y_encoder[i].classes_[x]
-                    result[col_name] = fun_a(result[col_name].astype(np.int32))
-                t_remap += timer_remap.toc()
-                t_total += timer_total.toc()
-            latency_optimized_result = result.copy()
-            del result
-            gc.collect()
-        peak_memory += exist_bit_arr.nbytes
-        latency_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop, t_build_index / num_loop,
-      t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model_size)).T
+            timer_remap.tic()
+            for i in range(num_tasks):    
+                col_name = data_ori.dtype.names[i+1]
+                fun_a = lambda x: list_y_encoder[i].classes_[x]
+                result[col_name] = fun_a(result[col_name].astype(np.int32))
+            t_remap += timer_remap.toc()
+            t_total += timer_total.toc()
+        latency_optimized_result = result.copy()
+        del result
+        gc.collect()
+    peak_memory += exist_bit_arr.nbytes
+    latency_optimized_latency = np.array((data_ori_size, np.sum(data_comp_size), sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, t_createfeatures / num_loop, t_nn / num_loop, t_locate_part / num_loop, t_decomp / num_loop, t_build_index / num_loop,
+    t_aux_lookup / num_loop, t_exist_lookup / num_loop, t_remap / num_loop, t_total / num_loop, num_decomp, count_nonexist, exist_bit_arr.nbytes/1024/1024, model_size)).T
 
     return_latency = None 
     if memory_optimized_latency is None and latency_optimized_latency is not None:
