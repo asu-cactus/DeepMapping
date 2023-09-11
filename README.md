@@ -1,10 +1,10 @@
-# DeepMapping: The Case for Learned Data Mapping for Compression and Efficient Query Processing
+# DeepMapping: Learned Data Mapping for Compression and Efficient Query Processing
 
 Resources for VLDB 2024 Submission
 
 <!-- TOC -->
 
-- [DeepMapping: The Case for Learned Data Mapping for Compression and Efficient Query Processing](#deepmapping-the-case-for-learned-data-mapping-for-compression-and-efficient-query-processing)
+- [DeepMapping: Learned Data Mapping for Compression and Efficient Query Processing](#deepmapping-learned-data-mapping-for-compression-and-efficient-query-processing)
   - [Dataset](#dataset)
   - [Model Searching](#model-searching)
   - [Benchmark](#benchmark)
