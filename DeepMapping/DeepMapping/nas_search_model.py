@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 """
 CREDIT: The implementation code of ENAS is modified based on the version implemented in Microsoft NNI AutoML toolkit.
-https://github.com/microsoft/nni/blob/master/nni/nas/oneshot/pytorch/enas.py
+https://github.com/microsoft/nni/blob/v2.2/nni/retiarii/oneshot/pytorch/enas.py
 """
 
 
