@@ -1,6 +1,6 @@
-# DeepMapping: Learned Data Mapping for Compression and Efficient Query Processing
+# DeepMapping: Learned Data Mapping for Lossless Compression and Efficient Lookup
 
-Resources for VLDB 2024 Submission
+Resources for ICDE 2024 Submission
 
 <!-- TOC -->
 
