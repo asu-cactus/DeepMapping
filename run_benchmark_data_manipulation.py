@@ -4,21 +4,22 @@ os.environ["CUDA_VISIBLE_DEVICES"]="0"
 import pandas as pd 
 import itertools
 from tqdm.auto import tqdm
-from DeepMapping.ndb_utils import df_preprocess, data_manipulation
+from DeepMapping import ndb_utils
+from DeepMapping.ndb_utils import df_preprocess, data_manipulation_change_ratio
 from DeepMapping.benchmark_utils import benchmark_handler
 
 list_dataset = ['data_manipulation/single_column_low_corr_100m', 
                 'data_manipulation/single_column_high_corr_100m', 
                 'data_manipulation/multi_column_low_corr_100m', 
                 'data_manipulation/multi_column_high_corr_100m']
-list_benchmark = ['uncompress', 'zstd', 'deepmapping']
-list_sample_size = [1000, 100000]
+list_benchmark = ['uncompress', 'zstd', 'deepmapping', 'hashtable', 'hashtable_with_compression']
+list_sample_size = [1000, 10000, 100000]
 list_ops = ['Default', 'Insert', 'Update', 'Delete']
 list_run_config = list(itertools.product(list_dataset, list_benchmark, list_sample_size, list_ops))
 print('[Config]: \n\t Dataset: {} \n\t Benchmark: {} \n\t Sample Size: {}'.format(list_dataset, list_benchmark, list_sample_size))
 
-num_loop = 100
-num_query = 5
+num_loop = 5
+num_query = 1
 search_algo = 'binary'
 file_name = 'benchmark_data_manipulation.csv'
 # The following flag is used to indicate whether you can re-use the existing disk 
@@ -35,25 +36,30 @@ os.environ['BACKEND'] = 'onnx'
 # a number of free memory for underlying process, current value: 100MB. Once the memory 
 # is insufficient, it will try to evict the least used partition to free the memory.
 os.environ['MODE'] = 'full'
+os.environ['MAX_GENERATE_FILE_THREADS'] = '2'
 
 for run_config in tqdm(list_run_config):
     print('[STATUS] Current config: {}'.format(run_config))
     task_name, benchmark, sample_size, data_ops = run_config   
-    generate_file = True
-    if generate_file: 
+    block_size, zstd_compress_level = ndb_utils.get_best_block_size_and_zstd_level(benchmark)
+    os.environ['DATA_OPS'] = data_ops
+    if os.environ['MODE'] == 'edge':
+        if generate_file == True:
+            raise ValueError("MODE: edge is only used for benchmark purpose cannot used with generate_file")
+        df = pd.read_csv('dataset/{}.csv'.format(task_name), nrows=10)
+    elif os.environ['MODE'] == 'full':
         df = pd.read_csv('dataset/{}.csv'.format(task_name))
-    else:
-        df = pd.read_csv('dataset/{}.csv'.format(task_name), nrows=2)
-    df, data_ori = df_preprocess(df, benchmark)
+    df, data_ori = df_preprocess(df, benchmark, is_data_manipulation=True)
     # perform data manipulation to the data
-    df, data_ori = data_manipulation(df, data_ops)
+    df, data_ori = data_manipulation_change_ratio(df, data_ops)
     function_call = benchmark_handler(benchmark)
     
     try:
         data_ori_size, data_comp_size, result, latency = function_call(df=df, data_ori=data_ori, 
                                                                 task_name=task_name,  sample_size=sample_size,
                                                                 generate_file=generate_file, num_loop=num_loop,
-                                                                num_query=num_query, search_algo=search_algo) 
+                                                                num_query=num_query, search_algo=search_algo, 
+                                                                block_size=block_size, zstd_compress_level=zstd_compress_level) 
         result_df = pd.DataFrame(latency)
         result_df['config'] = str(run_config)
         result_df['data-ops'] = str(data_ops)

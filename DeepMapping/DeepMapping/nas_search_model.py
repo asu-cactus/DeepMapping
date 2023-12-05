@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchmetrics
 import zstd
+from DeepMapping import ndb_utils
 from DeepMapping.nas_search_space import generate_search_space
 from DeepMapping.ndb_utils import df_preprocess, data_manipulation
 from sklearn import preprocessing
@@ -18,12 +19,12 @@ from tqdm.auto import tqdm
 
 """
 CREDIT: The implementation code of ENAS is modified based on the version implemented in Microsoft NNI AutoML toolkit.
-https://github.com/microsoft/nni/blob/v2.2/nni/retiarii/oneshot/pytorch/enas.py
+https://github.com/microsoft/nni/blob/master/nni/nas/oneshot/pytorch/enas.py
 """
 
 
 def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR_CTRL_TRAIN=50, TASK_NAME='nas', CUDA_ID=0,
-                 IS_DATA_MANIPULATION=False):
+                 IS_DATA_MANIPULATION=False, EARLY_STOP_DELTA=0.0001, NUM_EARLYSTOP_PATIENT=3):
     """Search model with given configurations
     
     Args: 
@@ -461,6 +462,7 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
     data_size = df.to_records(index=False).nbytes/1024/1024
     
     # load data into pytorch dataloader object
+    # the batch size can be changed to fully utilize your available GPU memory
     mydata = CustomDataset(x, list_y_encoded, max_len, chunk_size=1024*16)
     mydata_ctrl = CustomDataset(x, list_y_encoded, max_len, chunk_size=1024*2)
     train_dataloader = torch.utils.data.DataLoader(mydata, batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
@@ -491,7 +493,7 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
     init_all(model, torch.nn.init.normal_, mean=0., std=0.05)
     init_all(controller, torch.nn.init.normal_, mean=0., std=0.05)
 
-    # you uncomment this to improve performance if you are using pytorch 2
+    # you can uncomment this to improve performance if you are using pytorch 2
     # model = torch.compile(model)
     # controller = torch.compile(controller)
 
@@ -500,6 +502,11 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
 
     list_acc_metrics = [torchmetrics.Accuracy().to(device) for _ in range(num_tasks)]
     ctrl_accuracy = torchmetrics.Accuracy().to(device)
+
+    stop_train_flag = False
+
+    timer_nas = ndb_utils.Timer()
+    timer_nas.tic()
 
     for n_epochs in tqdm(range(NUM_ITER)):
         # sample a model from the search space at each iteration
@@ -568,11 +575,13 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
                 print(log_message)
                 f.write(log_message)
                 f.flush()
-                
+        
         if n_epochs % NUM_ITR_CTRL_TRAIN == (NUM_ITR_CTRL_TRAIN-1):
             # train controller
             model.eval()
             controller.train()
+            count_meet_early_stop_condition = 0
+            loss_prev = 0
             for ctrl_step, batch_data in enumerate(ctrl_dataloader):
                 for i in range(len(batch_data)):
                     batch_data[i] = batch_data[i].to(device)
@@ -628,6 +637,12 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
                 extra_message += 'skip loss {},'.format(loss)
                 loss /= ctrl_steps_aggregate
                 loss.backward()
+                loss_detached = loss.cpu()
+                if np.abs(loss_detached-loss_prev) <= EARLY_STOP_DELTA:
+                    count_meet_early_stop_condition += 1
+                else:
+                    count_meet_early_stop_condition = 0
+                loss_prev = loss_detached
                 if (ctrl_step + 1) % ctrl_steps_aggregate == 0:
                     if grad_clip > 0:
                         nn.utils.clip_grad_norm_(controller.parameters(), 5)
@@ -646,8 +661,17 @@ def search_model(DATA_SUB_PATH, NUM_ITER=2000, NUM_EPOCHS_MODEL_TRAIN=5, NUM_ITR
                     print(log_message)
                     f.write(log_message)
                     f.flush()
+                
+                if count_meet_early_stop_condition >= NUM_EARLYSTOP_PATIENT:
+                    stop_train_flag = True
+                    break
+            
+        if stop_train_flag == True:
+            print("Early Stop")
+            break
 
-
+    t_nas = timer_nas.toc()
+    print("[INFO] nas search time: {}".format(t_nas))
     best_model = interprete_structure(controller.resample(), search_space)
 
     # you can try to sample multiple times and select most voted searched structure

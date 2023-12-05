@@ -8,7 +8,7 @@ if you want to use onnxrunutime as backend.
 You are required to install tf2onnx by using pip.
 """
 
-for root, dirs, files in os.walk("models/nas/tpch-s1/", topdown=False):
+for root, dirs, files in os.walk("models", topdown=False):
    for name in files:
       if '.h5' in name:
          model_name = name.split('.')[0]

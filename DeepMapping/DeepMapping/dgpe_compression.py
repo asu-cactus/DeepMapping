@@ -80,7 +80,7 @@ def dge_decompression(dge_comp_data, required_bits, dge_col_min_vals):
 
 def measure_latency(df, data_ori, task_name, sample_size, 
                     generate_file=True,
-                    num_loop=10, num_query=5, search_algo='binary'):
+                    num_loop=10, num_query=5, search_algo='binary', block_size=1024*1024, **kwargs):
     """Measure the end-end latency of data query
 
     Args:
@@ -100,15 +100,13 @@ def measure_latency(df, data_ori, task_name, sample_size,
             number of queries
         search_algo : str
             search algorithm that applied to search entry in each partition
-        path_to_model : str
-            load model from custom path
+        block_size  : int
+            block size for each partition, size in bytes
     """
     data_ori_size = 0
     data_comp_size = 0
-    memory_optimized_latency = None 
-    latency_optimized_latency = None 
-    memory_optimized_result = None
-    latency_optimized_result = None
+    arr_latency = None 
+    arr_result = None
 
     non_int_cols = []
     non_int_cols_dtypes = []
@@ -132,7 +130,6 @@ def measure_latency(df, data_ori, task_name, sample_size,
         dge_dtype = np.uint64
 
     key = df.columns[0]
-    block_size = 1024 * 1024
     record_size = data_ori[0].nbytes
     num_record_per_part = np.floor(block_size / record_size)
     x = data_ori[key]
@@ -143,18 +140,18 @@ def measure_latency(df, data_ori, task_name, sample_size,
     print('[Partition] Size {} Per Partition, # Partition: {}'.format(record_size*num_record_per_part/1024, num_partition))
 
     root_path = 'temp'
-    task_name = task_name
+    if os.environ['MODE'] == 'tuning':
+        root_path = 'temp_tune'
     folder_name = 'dgpe'
-    comp_data_dir = os.path.join(root_path, task_name, folder_name)
+    comp_data_dir = os.path.join(root_path, task_name, folder_name, str(block_size))
     print('[Generate File Path]: {}'.format(comp_data_dir))
     # generate file
     if generate_file:
         ndb_utils.recreate_temp_dir(comp_data_dir)
         data_size = 0
+        data_partition_idx = (x - x_start) // num_record_per_part
         for block_idx in tqdm(range(num_partition)):
-            val_start, val_end = x_start + block_idx * \
-                num_record_per_part, x_start + (block_idx+1)*num_record_per_part
-            data_idx = np.logical_and(x >= val_start, x < val_end)  
+            data_idx = data_partition_idx == block_idx
             data_dge_part = dge_comp_data[data_idx]
             if len(data_dge_part) == 0:
                 continue
@@ -266,18 +263,11 @@ def measure_latency(df, data_ori, task_name, sample_size,
                 if cache_block_memory + decomp_memory > peak_memory:
                     peak_memory = cache_block_memory + decomp_memory
             t_total += timer_total.toc()
-    latency_optimized_result = result.copy()
-    latency_optimized_latency = np.array((data_ori_size, data_comp_size, sample_size, 1, peak_memory/1024/1024, t_sort / num_loop, 
-    t_locate_part / num_loop, t_decomp / num_loop, 
-    t_lookup / num_loop, t_total / num_loop, num_decomp, count_nonexist)).T
+    arr_result = result.copy()
+    arr_latency = np.array((data_ori_size, data_comp_size, sample_size, peak_memory/1024/1024, t_sort / num_loop, 
+    0, 0, t_locate_part / num_loop, t_decomp / num_loop, 
+    t_lookup / num_loop, 0, 0, t_total / num_loop, num_decomp, count_nonexist)).T
 
-    return_latency = None 
-    if memory_optimized_latency is None and latency_optimized_latency is not None:
-        return_latency = latency_optimized_latency.reshape((1,-1))
-    elif memory_optimized_latency is not None and latency_optimized_latency is None:
-        return_latency =  memory_optimized_latency.reshape((1,-1))
-    elif memory_optimized_latency is not None and latency_optimized_latency is not None:
-        return_latency = np.vstack((memory_optimized_latency, latency_optimized_latency))
+    return_latency = arr_latency.reshape((1,-1))
 
-
-    return data_ori_size, data_comp_size, [memory_optimized_result, latency_optimized_result], return_latency
+    return data_ori_size, data_comp_size, [arr_result], return_latency
